@@ -1,0 +1,205 @@
+---
+title: "Weather data for Hotel in Oahu"
+author: "Helen Hastedt"
+date: "2025-08-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+##compiling rainfall data for my Hotel List on Oahu over time.
+##Load packages
+```{r}
+library(terra)
+library(sf)
+library(dplyr)
+library(stringr)
+library(writexl)
+library(ggplot2)
+library(readxl)
+```
+
+## Set folder paths
+```{r}
+parent_folder <- "C:/Users/hhast/OneDrive/Dokumente/Studium/Studium USA/Uni Hawaii/MS/Thesis water use Oahu Tourism/Data/temperature/max/day/oa/data_map/2012"
+month_folders <- list.dirs(parent_folder, recursive = FALSE, full.names = TRUE)
+##tif_files <- list.files(parent_folder, pattern = "\\.tiff?$", full.names = TRUE, ignore.case = TRUE)
+hotel_path <- "C:/Users/hhast/OneDrive/Dokumente/Studium/Studium USA/Uni Hawaii/MS/Thesis water use Oahu Tourism/Data/Data_Locations_hotels.xlsx"
+```
+##Find tif rain data files
+```{r}
+# Alle TIFs unterhalb von 2012 finden
+tif_files <- list.files(parent_folder,
+                        pattern = "\\.tiff?$",
+                        full.names = TRUE,
+                        recursive = TRUE,
+                        ignore.case = TRUE)
+
+length(tif_files)
+head(tif_files, 3)
+
+#read Data_Location_hotels
+Data_Locations_hotels <- readxl::read_excel(hotel_path)
+```
+
+
+##copying the original coordinates to the variable
+```{r}
+Data_Locations_hotels[[4]] <- as.numeric(Data_Locations_hotels[[4]])
+Data_Locations_hotels[[5]] <- as.numeric(Data_Locations_hotels[[5]])
+
+points_sf <- sf::st_as_sf(Data_Locations_hotels, coords = c(4, 5), crs = 4326)
+points_vect <- terra::vect(points_sf)
+hotel_summary <- Data_Locations_hotels
+```
+##Initialize list to collect results
+# merge ("/Users/hhast/Documents/Studium/Studium USA/Uni Hawaii/MS/Thesis water use Oahu Tourism/Data/HCDP/July Data/temperature/max/day/oa/data_map/2012")
+```{r}
+all_data <- list()
+```
+##Loop through month folders and tif files
+```{r}
+  all_data <- list()
+  for (tif_file in tif_files) {
+    r <- rast(tif_file)
+    
+    if (!same.crs(r, points_vect)) {
+      points_vect <- project(points_vect, crs(r))
+    }
+    
+    vals <- terra::extract(r, points_vect)[, 2]
+    if (any(is.na(vals))) {
+      vals_na_fixed <- terra::extract(r, points_vect, buffer = 500, fun = mean, na.rm = TRUE)[, 2]
+      vals[is.na(vals)] <- vals_na_fixed[is.na(vals)]
+    }
+    
+    date_str <- str_extract(tif_file, "\\d{4}_\\d{2}_\\d{2}")
+    date_val <- as.Date(date_str, format = "%Y_%m_%d")
+    
+    df_temp <- as.data.frame(points_sf)
+    df_temp$rainfall_mm <- vals
+    df_temp$date <- date_val
+    
+    all_data[[length(all_data) + 1]] <- df_temp
+  }
+```
+##Kombinierte Tagesdaten eines Monats
+```{r}
+rainfall_data <- bind_rows(all_data)
+```
+##Wetterkategorien erzeugen
+```{r}
+ rainfall_data <- rainfall_data %>%
+    mutate(
+      norain   = ifelse(rainfall_mm == 0, 1, 0),
+      low      = ifelse(rainfall_mm > 0  & rainfall_mm <= 30, 1, 0),
+      moderate = ifelse(rainfall_mm > 30 & rainfall_mm < 100, 1, 0),
+      heavy    = ifelse(rainfall_mm >= 100, 1, 0)
+    )
+```
+## Monatsschlüssel extrahieren
+```{r}
+ month_id <- format(rainfall_data$date[1], "%Y_%m")
+```
+##Funktion zur Berechnung von Dürre-Einheiten
+```{r}
+calculate_drought_units <- function(rain_vec) {
+    rle_obj <- rle(rain_vec == 0)
+    drought_lengths <- rle_obj$lengths[rle_obj$values == TRUE]
+    drought_units <- sum(pmax(drought_lengths - 2, 0))
+    return(drought_units)
+  }
+```
+## Zusammenfassen pro Hotel
+```{r}
+drought_summary <- rainfall_data %>%
+    group_by(Name) %>%
+    summarise(
+      !!paste0("drought_days_", month_id)   := calculate_drought_units(rainfall_mm),
+      !!paste0("days_norain_", month_id)    := sum(norain),
+      !!paste0("days_low_", month_id)       := sum(low),
+      !!paste0("days_moderate_", month_id)  := sum(moderate),
+      !!paste0("days_heavy_", month_id)     := sum(heavy),
+      !!paste0("total_rain_", month_id)     := sum(rainfall_mm, na.rm = TRUE),
+      .groups = "drop"
+    )
+```
+## An ursprüngliche Tabelle anhängen (join by Name)
+```{r}
+hotel_summary <- left_join(hotel_summary, drought_summary, by = "Name")
+```
+##Combine all into one final data frame
+```{r}
+rainfall_data <- bind_rows(all_data)
+```
+##Wetterkategorien
+```{r}
+rainfall_data <- rainfall_data %>%
+     mutate(
+      norain   = ifelse(rainfall_mm == 0, 1, 0),
+      low      = ifelse(rainfall_mm > 0  & rainfall_mm <= 30, 1, 0),
+      moderate = ifelse(rainfall_mm > 30 & rainfall_mm < 100, 1, 0),
+      heavy    = ifelse(rainfall_mm >= 100, 1, 0)
+  )
+```
+## Monat und Jahr extrahieren
+```{r}
+rainfall_data <- rainfall_data %>%
+  mutate(
+    month = format(date, "%Y-%m")
+  )
+```
+##Excel for just rainfall over 2012 Data
+```{r}
+library(writexl)
+
+# Korrigiere den Pfad mit "Dokumente"
+out_path <- "C:/Users/hhast/OneDrive/Dokumente/Studium/Studium USA/Uni Hawaii/MS/Thesis water use Oahu Tourism/Data/rainfall_data_summary_2012.xlsx"
+
+# Stelle sicher, dass das Zielverzeichnis existiert
+dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
+
+# Excel-Datei schreiben (geometry bleibt leer in Excel, ist aber kein Problem)
+write_xlsx(rainfall_data, out_path)
+```
+## Now plotting an Error Bar Diagramm for the Rainfall_data
+```{r}
+# Summarise rainfall per day
+rainfall_day <- rainfall_data %>%
+  mutate(date = as.Date(date)) %>%
+  group_by(date) %>%
+  summarise(
+    mean_mm = mean(rainfall_mm, na.rm = TRUE),
+    min_mm  = min(rainfall_mm, na.rm = TRUE),
+    max_mm  = max(rainfall_mm, na.rm = TRUE),
+    n       = dplyr::n()
+  ) %>%
+  arrange(date)
+
+# Option A: Ribbon (min–max range) with mean line
+ggplot(rainfall_day, aes(x = date, y = mean_mm)) +
+  geom_ribbon(aes(ymin = min_mm, ymax = max_mm), alpha = 0.2) +
+  geom_line() +
+  geom_point(size = 0.8) +
+  labs(
+    title = "Daily Rainfall: Mean with Min–Max Range",
+    x = "Date",
+    y = "Rainfall (mm)"
+  ) +
+  theme_minimal()
+
+# Option B: Error bars instead of ribbon
+ggplot(rainfall_day, aes(x = date, y = mean_mm)) +
+  geom_errorbar(aes(ymin = min_mm, ymax = max_mm), width = 0) +
+  geom_line() +
+  geom_point(size = 0.8) +
+  labs(
+    title = "Daily Rainfall: Mean with Min–Max Error Bars",
+    x = "Date",
+    y = "Rainfall (mm)"
+  ) +
+  theme_minimal()
+```
+
+
